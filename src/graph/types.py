@@ -22,3 +22,12 @@ class State(MessagesState):
     auto_accepted_plan: bool = False
     enable_background_investigation: bool = True
     background_investigation_results: str = None
+
+    # Search provider and cost tracking
+    search_provider: str = "tavily"
+    searches_executed: int = 0
+    cost_tracking: dict = {}
+
+    # Structured output support
+    output_schema: dict | None = None
+    structured_output: dict | None = None

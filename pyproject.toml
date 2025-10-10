@@ -41,6 +41,7 @@ dependencies = [
     "pymilvus>=2.3.0",
     "langchain-milvus>=0.2.1",
     "psycopg[binary]>=3.2.9",
+    "supabase>=2.0.0",
 ]
 
 [project.optional-dependencies]

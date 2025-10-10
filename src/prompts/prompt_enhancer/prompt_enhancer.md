@@ -42,6 +42,62 @@ You are an expert prompt engineer. Your task is to enhance user prompts to make 
 4. **Add viral elements**: Include trending topics, relatable content, and interactive elements
 5. **Make it shareable**: Ensure the prompt guides toward content that encourages sharing and discussion
 6. **Include visual considerations**: Suggest emoji usage, formatting, and visual appeal elements
+{% elif report_style == "sales_intelligence" %}
+# Enhancement Guidelines for Sales Intelligence Style
+
+**MANDATORY STRUCTURE - You MUST enhance the prompt to request ALL seven sections below:**
+
+Transform any sales intelligence prompt into a comprehensive B2B research request with this EXACT structure:
+
+1. **Company Overview** - ALWAYS include: founding story, leadership team, funding rounds, current market position, and growth trajectory
+2. **Industry Focus** - ALWAYS include: primary industries served, vertical specialization, target customer segments, and market positioning
+3. **Enterprise Stack** - ALWAYS include: detailed technology infrastructure, development tools, cloud platforms, data architecture, and integration patterns
+4. **Digital Transformation Initiatives** - ALWAYS include: cloud migration status, legacy system modernization efforts, automation adoption, AI/ML investments, and digitization roadmap
+5. **Pain Points and Challenges** - ALWAYS include: customer complaints from reviews/forums, product limitations, frequently mentioned gaps, operational challenges, and unmet customer needs
+6. **Strategic Initiatives and Product Launches** - ALWAYS include: recent product releases, feature announcements, partnerships, acquisitions, go-to-market changes, and roadmap signals from job postings or executive statements
+7. **Competitive Differentiation Opportunities** - ALWAYS include: areas where competitors have advantages, potential objection handling strategies, and positioning angles for sales conversations
+
+**Additional Requirements:**
+- Specify target word count: 3000-5000 words
+- Request specific data points, quotes from executives, and customer feedback
+- Format for sales enablement use
+- Include actionable sales talking points
+{% elif report_style == "workflow_blueprint" %}
+# Enhancement Guidelines for Workflow Blueprint Style
+1. **Add automation context**: When context describes capabilities, structure prompt to extract workflows that leverage those specific features
+2. **Improve process structure**: Organize as sequential, actionable steps with clear triggers, conditions, and outcomes
+3. **Clarify implementation expectations**: Specify narrative format (no bullets), action verb usage, and LLM-implementable logic
+4. **Add integration touchpoints**: Include system interactions, data flows, and handoff points between steps
+5. **Make it executable**: Ensure the prompt guides toward concrete automation instructions that an LLM agent could follow
+6. **Include decision logic**: Specify conditional branches, error handling, and edge case management within the workflow
+{% elif report_style == "competitive_analysis" %}
+# Enhancement Guidelines for Competitive Analysis Style
+
+**MANDATORY PROCESS - Follow these steps when enhancing competitive analysis prompts:**
+
+**Step 1: Extract Value Proposition**
+- Parse the context field to identify specific capabilities, strengths, or features mentioned
+- These become your competitive "lenses" for analysis
+
+**Step 2: Transform the Prompt**
+Transform the original prompt into a comprehensive competitive analysis structured around YOUR capabilities from the context. Use this EXACT format:
+
+"Conduct a comprehensive competitive analysis of [COMPANY], evaluating their capabilities specifically through the lens of [LIST EACH CAPABILITY FROM CONTEXT]. Structure your research as follows:
+
+(1) [First Capability] Assessment - analyze how [COMPANY] implements [first capability]; benchmark their approach against best-in-class implementations and identify gaps or limitations compared to platforms that excel at [first capability]
+
+(2) [Second Capability] Analysis - [repeat pattern for second capability]
+
+[Continue for each capability mentioned in context]
+
+(N) Competitive Positioning Matrix - create a detailed comparison showing where [COMPANY] leads, matches, or lags in each of these dimensions
+
+(N+1) Battle Card Development - provide specific talking points, competitive differentiation angles, and objection handling strategies for positioning against [COMPANY] in each capability area, highlighting your strengths and their weaknesses"
+
+**Step 3: Add Requirements**
+- Request concrete examples and feature comparisons
+- Specify 3000-4000 word target length
+- Request strategic recommendations for competitive positioning
 {% else %}
 # General Enhancement Guidelines
 1. **Add specificity**: Include relevant details, scope, and constraints
@@ -116,6 +172,51 @@ Create engaging social media content about AI that will stop the scroll and spar
 **Enhanced**:
 <enhanced_prompt>
 Develop viral-worthy social media content that makes climate change accessible and shareable without being preachy. Open with a scroll-stopping hook like 'The weather app on your phone is telling a bigger story than you think 📱🌡️' and break down complex science into digestible, engaging chunks. Use relatable comparisons (Earth's fever, atmosphere as a blanket), trending formats (before/after visuals, myth-busting series, quick facts), and interactive elements (polls, questions, challenges). Include strategic hashtags (#ClimateChange #Science #Environment), eye-catching emojis, and shareable graphics or infographics. Address common questions and misconceptions with clear, factual responses. Create content that encourages positive action rather than climate anxiety, ending with empowering steps followers can take. Optimize for platform-specific features (Instagram Stories, TikTok trends, Twitter threads) and include calls-to-action that drive engagement and sharing.
+</enhanced_prompt>
+
+{% elif report_style == "sales_intelligence" %}
+# Sales Intelligence Style Examples
+
+**Original**: "Research StackAI"
+**Enhanced**:
+<enhanced_prompt>
+Conduct comprehensive B2B sales intelligence research on StackAI. Structure your analysis with: (1) Company Overview - founding story, leadership team, funding rounds, current market position, and growth trajectory, (2) Industry Focus - primary industries served, vertical specialization, target customer segments, and market positioning, (3) Enterprise Stack - detailed technology infrastructure, development tools, cloud platforms, data architecture, and integration patterns, (4) Digital Transformation Initiatives - cloud migration status, legacy system modernization efforts, automation adoption, AI/ML investments, and digitization roadmap, (5) Pain Points and Challenges - customer complaints from reviews/forums, product limitations, frequently mentioned gaps, operational challenges, and unmet customer needs, (6) Strategic Initiatives and Product Launches - recent product releases, feature announcements, partnerships, acquisitions, go-to-market changes, and roadmap signals from job postings or executive statements, (7) Competitive Differentiation Opportunities - areas where competitors have advantages, potential objection handling strategies, and positioning angles for sales conversations. Include specific data points, quotes from executives, customer feedback, and actionable sales talking points. Target 3000-5000 words formatted for sales enablement.
+</enhanced_prompt>
+
+**Original**: "Analyze Notion's enterprise approach"
+**Enhanced**:
+<enhanced_prompt>
+Perform detailed sales intelligence analysis of Notion for B2B enterprise sales targeting. Structure the research as: (1) Company Overview - organizational history, executive leadership profiles, funding and valuation milestones, and market position in the productivity software landscape, (2) Industry Focus - which industries and company sizes they serve most effectively, vertical expansion strategies, and underserved market segments, (3) Enterprise Stack - their technology foundation, infrastructure choices, security architecture, scalability approach, and enterprise-grade capabilities, (4) Digital Transformation - how they position around digital transformation, their approach to modernizing workplace collaboration, and integration with enterprise digital initiatives, (5) Pain Points and Challenges - documented customer frustrations, feature gaps in enterprise scenarios, scalability limitations, security concerns, and common objections from enterprise buyers, (6) Strategic Initiatives and Product Launches - recent enterprise feature releases, pricing tier changes, partnership announcements, market expansion signals, and product roadmap hints from job postings or executive communications, (7) Competitive Differentiation Opportunities - specific areas where your solution can outposition Notion, objection handling for "why not Notion?", and battle card talking points emphasizing their weaknesses relative to enterprise requirements. Include concrete examples, customer quotes, and sales enablement insights.
+</enhanced_prompt>
+
+{% elif report_style == "workflow_blueprint" %}
+# Workflow Blueprint Style Examples
+
+**Original**: "Document customer onboarding process"
+**Enhanced**:
+<enhanced_prompt>
+Create a comprehensive workflow blueprint for customer onboarding that can be implemented by an LLM-powered automation system. Structure the workflow in narrative format using action verbs and clear sequential logic. Begin with the trigger event (new customer signup detected in CRM) and document each step as a complete sentence describing the action, system involved, data transformation, and expected outcome. Include conditional branches for different customer types (enterprise vs. self-serve), decision points for human escalation (when customer data is incomplete or requires validation), integration touchpoints with specific systems (CRM for customer data retrieval, email platform for welcome sequence, billing system for subscription activation, documentation portal for resource provisioning), error handling procedures (what happens if email bounces, payment fails, or API calls timeout), and success criteria for each stage. Describe data flows between steps showing what information passes from one action to the next. Ensure every step is concrete enough for an AI agent to execute without ambiguity. Target 2000-3000 words in flowing narrative style without bullet points.
+</enhanced_prompt>
+
+**Original**: "Explain invoice processing workflow"
+**Enhanced**:
+<enhanced_prompt>
+Develop a detailed workflow blueprint for automated invoice processing suitable for LLM-based implementation. Write in continuous narrative format describing the complete end-to-end process using action-oriented language. Start with the triggering event (invoice received via email attachment or uploaded to portal) and flow through each stage: document ingestion where the system extracts the PDF or image file and prepares it for processing, OCR extraction where text and structured data are pulled from the invoice using vision capabilities, data validation where extracted fields like vendor name, invoice number, amount, and date are verified against expected patterns and business rules, approval routing where the system determines the appropriate approver based on amount thresholds and department budgets, human-in-the-loop integration points where ambiguous cases are flagged for manual review with specific criteria for escalation, payment processing where approved invoices trigger payment instructions to the accounting system with proper reference numbers and audit trails, and exception handling for scenarios like duplicate invoices, missing purchase orders, or amount mismatches. Specify exact integration points, data transformations, and conditional logic without using bullet points. Make it detailed enough for direct LLM agent execution.
+</enhanced_prompt>
+
+{% elif report_style == "competitive_analysis" %}
+# Competitive Analysis Style Examples
+
+**Original**: "Research StackAI"
+**Enhanced** (with context: "I excel at human-in-the-loop workflows, extensive third-party integrations, and no-code workflow builders"):
+<enhanced_prompt>
+Conduct a comprehensive competitive analysis of StackAI, evaluating their capabilities specifically through the lens of three key competitive dimensions: human-in-the-loop (HITL) workflows, third-party integrations, and no-code workflow builders. Structure your research as follows: (1) HITL Capabilities Assessment - analyze how StackAI implements human oversight, approval workflows, manual intervention points, and human-AI collaboration features; benchmark their approach against best-in-class HITL implementations and identify gaps or limitations compared to platforms that excel at human-in-the-loop design, (2) Integration Ecosystem Analysis - map their entire integration landscape including native connectors, API coverage, webhook support, authentication methods, and pre-built integration templates; compare the breadth and depth of their integration catalog against competitors with extensive integration libraries, noting any missing critical integrations or integration patterns they don't support, (3) No-Code Workflow Builder Evaluation - assess their visual workflow designer, drag-and-drop interface, template library, conditional logic capabilities, and ease of use for non-technical users; benchmark against leading no-code platforms to identify UX gaps, feature limitations, or areas where their builder is less intuitive, (4) Competitive Positioning Matrix - create a detailed comparison showing where StackAI leads, matches, or lags in each of these three dimensions, (5) Battle Card Development - provide specific talking points, competitive differentiation angles, and objection handling strategies for positioning against StackAI in each capability area, highlighting your strengths and their weaknesses. Include concrete examples, feature comparisons, and strategic recommendations for competitive positioning. Target 3000-4000 words.
+</enhanced_prompt>
+
+**Original**: "Analyze Notion's enterprise features"
+**Enhanced** (with context: "We specialize in advanced permissions, audit logging, and compliance certifications"):
+<enhanced_prompt>
+Perform a targeted competitive analysis of Notion's enterprise capabilities, focusing specifically on three areas where we have competitive advantages: advanced permissions systems, audit logging, and compliance certifications. Structure the analysis as: (1) Permissions Architecture Deep Dive - evaluate Notion's permission model including role-based access control (RBAC), attribute-based access control (ABAC), granular permissions at page/block/database level, permission inheritance patterns, guest access controls, and external sharing security; identify gaps compared to platforms with sophisticated enterprise permission systems, noting limitations in their permission granularity, role complexity, or access control flexibility, (2) Audit Logging Capabilities - assess their audit trail comprehensiveness including what events are logged, log retention policies, searchability and filtering options, export capabilities, real-time monitoring, and integration with SIEM tools; compare against enterprise platforms with robust audit logging to identify what critical events Notion doesn't capture or audit limitations that create compliance risks, (3) Compliance Certification Analysis - document their current compliance certifications (SOC 2, ISO 27001, GDPR, HIPAA, etc.), certification scope and limitations, data residency options, encryption standards, and compliance gaps; benchmark against competitors with extensive compliance portfolios to identify which certifications they lack or where their compliance implementation falls short, (4) Enterprise Readiness Scoring - create a detailed scorecard across these three dimensions showing feature parity gaps and competitive advantages, (5) Positioning Strategy - develop specific messaging for enterprise buyers emphasizing your superior capabilities in permissions, audit logging, and compliance, with concrete examples of use cases where Notion's limitations create risks. Include decision-maker talking points and ROI arguments for choosing your platform over Notion for security-conscious enterprises.
 </enhanced_prompt>
 
 {% else %}

@@ -1,13 +1,14 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import base64
 import json
 import logging
-from typing import Annotated, Any, List, cast
+from typing import Annotated, Any, Dict, List, Optional, cast
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
@@ -39,7 +40,15 @@ from src.server.chat_request import (
     GenerateProseRequest,
     TTSRequest,
 )
+from src.server.async_request import (
+    AsyncResearchRequest,
+    AsyncResearchResponse,
+    ResearchStatus,
+    ResearchStatusResponse,
+    ResearchResultResponse,
+)
 from src.server.config_request import ConfigResponse
+from src.server.job_manager import job_manager, ResearchJob
 from src.server.mcp_request import MCPServerMetadataRequest, MCPServerMetadataResponse
 from src.server.mcp_utils import load_mcp_tools
 from src.server.rag_request import (
@@ -47,6 +56,7 @@ from src.server.rag_request import (
     RAGResourceRequest,
     RAGResourcesResponse,
 )
+from src.middleware.auth import init_api_keys, optional_verify_api_key
 from src.tools import VolcengineTTS
 from src.utils.json_utils import sanitize_args
 
@@ -56,8 +66,38 @@ INTERNAL_SERVER_ERROR_DETAIL = "Internal Server Error"
 
 app = FastAPI(
     title="DeerFlow API",
-    description="API for Deer",
+    description="""
+# DeerFlow Deep Research API
+
+AI-powered deep research and analysis framework with multi-agent orchestration.
+
+## Features
+- 🔍 **Deep Research**: Multi-step research with web search and code execution
+- 📊 **Structured Output**: Extract data into custom JSON schemas
+- 🎯 **Multiple Report Styles**: Academic, news, sales intelligence, workflow blueprints, and more
+- 🤖 **Multi-Agent System**: Coordinator, Planner, Researcher, Coder, Reporter agents
+- 💾 **Async Job Processing**: Submit jobs and poll for results
+- 🔐 **API Key Authentication**: Secure endpoints with Bearer token auth
+
+## Authentication
+Most endpoints require API key authentication. Include your API key in the request header:
+
+```
+Authorization: Bearer YOUR_API_KEY
+```
+
+Get your API key from your administrator or set `SKIP_AUTH=true` for local development.
+    """,
     version="0.1.0",
+    docs_url="/docs",  # Swagger UI at /docs
+    redoc_url="/redoc",  # ReDoc at /redoc
+    openapi_tags=[
+        {"name": "Research", "description": "Core research endpoints for running deep analysis"},
+        {"name": "Jobs", "description": "Async job management - create, poll, and retrieve results"},
+        {"name": "Tools", "description": "Utility endpoints - prompt enhancement, podcast generation, etc."},
+        {"name": "RAG", "description": "Retrieval-Augmented Generation - manage knowledge base resources"},
+        {"name": "Configuration", "description": "System configuration and MCP server management"},
+    ],
 )
 
 # Add CORS middleware
@@ -65,6 +105,11 @@ app = FastAPI(
 # for better security and flexibility across different environments.
 allowed_origins_str = get_str_env("ALLOWED_ORIGINS", "http://localhost:3000")
 allowed_origins = [origin.strip() for origin in allowed_origins_str.split(",")]
+
+# Allow file:// origins for local HTML testing (shows as "null" in CORS)
+# This is safe for local development only
+if "null" not in allowed_origins:
+    allowed_origins.append("null")
 
 logger.info(f"Allowed origins: {allowed_origins}")
 
@@ -83,8 +128,31 @@ in_memory_store = InMemoryStore()
 graph = build_graph_with_memory()
 
 
-@app.post("/api/chat/stream")
-async def chat_stream(request: ChatRequest):
+@app.on_event("startup")
+async def startup_event():
+    """Initialize API keys and other resources on server startup."""
+    logger.info("Starting DeerFlow API server...")
+    init_api_keys()
+    logger.info("Server startup complete")
+
+
+@app.post(
+    "/api/chat/stream",
+    tags=["Research"],
+    summary="Stream research results in real-time",
+    description="""
+    Submit a research query and receive streaming updates via Server-Sent Events (SSE).
+
+    This endpoint executes the full research workflow synchronously and streams intermediate
+    results (agent thoughts, tool calls, observations) back to the client in real-time.
+
+    **Authentication**: Required (unless SKIP_AUTH=true)
+    """,
+)
+async def chat_stream(
+    request: ChatRequest,
+    auth: Optional[Dict[str, str]] = Depends(optional_verify_api_key),
+):
     # Check if MCP server configuration is enabled
     mcp_enabled = get_bool_env("ENABLE_MCP_SERVER_CONFIGURATION", False)
 
@@ -113,6 +181,8 @@ async def chat_stream(request: ChatRequest):
             request.enable_background_investigation,
             request.report_style,
             request.enable_deep_thinking,
+            request.search_provider,
+            request.output_schema,
         ),
         media_type="text/event-stream",
     )
@@ -288,6 +358,8 @@ async def _astream_workflow_generator(
     enable_background_investigation: bool,
     report_style: ReportStyle,
     enable_deep_thinking: bool,
+    search_provider: str,
+    output_schema: dict,
 ):
     # Process initial messages
     for message in messages:
@@ -304,6 +376,9 @@ async def _astream_workflow_generator(
         "auto_accepted_plan": auto_accepted_plan,
         "enable_background_investigation": enable_background_investigation,
         "research_topic": messages[-1]["content"] if messages else "",
+        "search_provider": search_provider,
+        "searches_executed": 0,
+        "output_schema": output_schema,
     }
 
     if not auto_accepted_plan and interrupt_feedback:
@@ -611,3 +686,334 @@ async def config():
         rag=RAGConfigResponse(provider=SELECTED_RAG_PROVIDER),
         models=get_configured_llm_models(),
     )
+
+
+# ============================================================================
+# ASYNC RESEARCH ENDPOINTS
+# ============================================================================
+
+
+async def _run_research_job(job: ResearchJob, request: AsyncResearchRequest):
+    """Run research job in the background"""
+    try:
+        # Update status to coordinating
+        job.update_status(ResearchStatus.COORDINATING)
+
+        # Create thread_id
+        thread_id = str(uuid4())
+        job.thread_id = thread_id
+
+        # Prepare workflow input
+        workflow_input = {
+            "messages": [{"role": "user", "content": request.query}],
+            "plan_iterations": 0,
+            "final_report": "",
+            "current_plan": None,
+            "observations": [],
+            "auto_accepted_plan": request.auto_accepted_plan,
+            "enable_background_investigation": request.enable_background_investigation,
+            "research_topic": request.query,
+            "search_provider": request.search_provider,
+            "searches_executed": 0,
+            "output_schema": request.output_schema,
+        }
+
+        # Prepare workflow config
+        workflow_config = {
+            "thread_id": thread_id,
+            "resources": request.resources,
+            "max_plan_iterations": request.max_plan_iterations,
+            "max_step_num": request.max_step_num,
+            "max_search_results": request.max_search_results,
+            "mcp_settings": {},
+            "report_style": request.report_style.value,
+            "enable_deep_thinking": request.enable_deep_thinking,
+            "recursion_limit": get_recursion_limit(),
+        }
+
+        # Track current agent node
+        final_report_chunks = []
+        researcher_findings_chunks = []
+        plan_data = None
+        latest_structured_output = None
+
+        # Stream and process events using astream_events for better control
+        async for event in graph.astream_events(
+            workflow_input,
+            config=workflow_config,
+            version="v2",
+        ):
+            event_type = event.get("event")
+            event_name = event.get("name", "")
+            event_data = event.get("data", {})
+            metadata = event.get("metadata", {})
+
+            # Capture structured_output from reporter_node completion
+            if event_type == "on_chain_end" and "reporter" in event_name.lower():
+                output = event_data.get("output", {})
+                logger.debug(f"Reporter node ended with output keys: {output.keys() if isinstance(output, dict) else 'not a dict'}")
+                if isinstance(output, dict) and "structured_output" in output:
+                    latest_structured_output = output["structured_output"]
+                    logger.info(f"✓ Captured structured_output from reporter: {json.dumps(latest_structured_output, indent=2)}")
+
+            # Track node transitions for status updates
+            if event_type == "on_chain_start":
+                node_name = event_name.lower()
+                if "coordinator" in node_name:
+                    job.update_status(ResearchStatus.COORDINATING)
+                elif "planner" in node_name:
+                    job.update_status(ResearchStatus.PLANNING)
+                elif "researcher" in node_name or "coder" in node_name:
+                    job.update_status(ResearchStatus.RESEARCHING)
+                elif "reporter" in node_name:
+                    job.update_status(ResearchStatus.REPORTING)
+
+            # Collect plan data
+            if event_type == "on_chain_end" and "planner" in event_name.lower():
+                output = event_data.get("output", {})
+                if isinstance(output, dict):
+                    # Extract plan from AIMessage content if present
+                    messages = output.get("messages", [])
+                    for msg in messages:
+                        if hasattr(msg, "content") and "{" in str(msg.content):
+                            try:
+                                plan_text = str(msg.content)
+                                start = plan_text.find("{")
+                                end = plan_text.rfind("}") + 1
+                                plan_json = plan_text[start:end]
+                                plan_data = json.loads(plan_json)
+                                job.plan = plan_data
+                                break
+                            except:
+                                pass
+
+            # Collect message content for report/findings
+            if event_type == "on_chat_model_stream":
+                chunk = event_data.get("chunk")
+                if chunk and hasattr(chunk, "content") and chunk.content:
+                    node = metadata.get("langgraph_node", "")
+                    if "reporter" in node:
+                        final_report_chunks.append(chunk.content)
+                    elif "researcher" in node or "coder" in node:
+                        researcher_findings_chunks.append(chunk.content)
+
+        # Mark as completed
+        job.final_report = "".join(final_report_chunks) if final_report_chunks else None
+        job.researcher_findings = (
+            "".join(researcher_findings_chunks) if researcher_findings_chunks else None
+        )
+
+        # Use structured output captured from stream
+        if latest_structured_output:
+            job.structured_output = latest_structured_output
+            logger.info(f"Set structured_output from stream for job {job.job_id}: {latest_structured_output}")
+        else:
+            logger.warning(f"No structured_output captured from stream for job {job.job_id}")
+
+        job.update_status(ResearchStatus.COMPLETED)
+
+        logger.info(f"Research job {job.job_id} completed successfully")
+
+    except Exception as e:
+        logger.exception(f"Error in research job {job.job_id}")
+        job.set_error(str(e))
+
+
+@app.post(
+    "/api/research/async",
+    response_model=AsyncResearchResponse,
+    tags=["Jobs"],
+    summary="Start async research job",
+    description="""
+    Submit a research query and receive a job_id for tracking progress asynchronously.
+
+    This endpoint immediately returns a job_id without waiting for research to complete.
+    Use the job_id to poll `/api/research/{job_id}/status` for progress updates and
+    `/api/research/{job_id}/result` to retrieve the final report when completed.
+
+    **Workflow:**
+    1. POST to this endpoint with your query
+    2. Receive job_id immediately
+    3. Poll `/api/research/{job_id}/status` until status is 'completed'
+    4. GET `/api/research/{job_id}/result` to retrieve final report and structured output
+
+    **Authentication**: Required (unless SKIP_AUTH=true)
+    """,
+)
+async def start_async_research(
+    request: AsyncResearchRequest,
+    auth: Optional[Dict[str, str]] = Depends(optional_verify_api_key),
+):
+    """
+    Start an asynchronous research job.
+
+    Returns a job_id that can be used to check status and retrieve results.
+    """
+    try:
+        # Create job
+        job = job_manager.create_job(request.query)
+
+        # Start background task
+        job.task = asyncio.create_task(_run_research_job(job, request))
+
+        return AsyncResearchResponse(
+            job_id=job.job_id,
+            status=job.status,
+            message="Research job started successfully",
+        )
+
+    except Exception as e:
+        logger.exception("Error starting async research")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/research/{job_id}/status",
+    response_model=ResearchStatusResponse,
+    tags=["Jobs"],
+    summary="Check job status",
+    description="""
+    Get the current status of an async research job.
+
+    Poll this endpoint every 2-5 seconds to track research progress.
+
+    **Status values:**
+    - `pending`: Job is queued, not started yet
+    - `coordinating`: Router agent is analyzing the query
+    - `planning`: Planner agent is creating the research plan
+    - `researching`: Researcher/Coder agents are gathering information
+    - `reporting`: Reporter agent is generating the final report
+    - `completed`: Research finished successfully (call /result to get data)
+    - `failed`: Job encountered an error (check error field)
+
+    **Authentication**: Required (unless SKIP_AUTH=true)
+    """,
+)
+async def get_research_status(
+    job_id: str,
+    auth: Optional[Dict[str, str]] = Depends(optional_verify_api_key),
+):
+    """
+    Get the current status of a research job.
+
+    Poll this endpoint to track progress:
+    - pending: Job is queued
+    - coordinating: Job is being routed
+    - planning: Creating research plan
+    - researching: Actively searching and gathering information
+    - reporting: Generating final report
+    - completed: Research is done (fetch results from /result endpoint)
+    - failed: Job failed (check error field)
+    """
+    job = job_manager.get_job(job_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    return ResearchStatusResponse(
+        job_id=job.job_id,
+        status=job.status,
+        error=job.error,
+        created_at=job.created_at.isoformat(),
+        updated_at=job.updated_at.isoformat(),
+    )
+
+
+@app.get(
+    "/api/research/{job_id}/result",
+    response_model=ResearchResultResponse,
+    tags=["Jobs"],
+    summary="Get job results",
+    description="""
+    Retrieve the final research report and structured data from a completed job.
+
+    **Important:** Only call this endpoint after `/status` returns `status='completed'`.
+
+    **Response includes:**
+    - `final_report`: Markdown-formatted research report
+    - `structured_output`: JSON data (if output_schema was provided in request)
+    - `researcher_findings`: Raw observations from research steps
+    - `plan`: The research plan that was executed
+    - `duration_seconds`: How long the research took
+
+    **Authentication**: Required (unless SKIP_AUTH=true)
+    """,
+)
+async def get_research_result(
+    job_id: str,
+    auth: Optional[Dict[str, str]] = Depends(optional_verify_api_key),
+):
+    """
+    Get the final result of a completed research job.
+
+    Only call this after status endpoint returns 'completed' status.
+    """
+    job = job_manager.get_job(job_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    return ResearchResultResponse(
+        job_id=job.job_id,
+        status=job.status,
+        thread_id=job.thread_id or "",
+        query=job.query,
+        final_report=job.final_report,
+        researcher_findings=job.researcher_findings,
+        plan=job.plan,
+        structured_output=job.structured_output,
+        error=job.error,
+        created_at=job.created_at.isoformat(),
+        completed_at=job.completed_at.isoformat() if job.completed_at else None,
+        duration_seconds=job.get_duration_seconds(),
+    )
+
+
+@app.delete(
+    "/api/research/{job_id}",
+    tags=["Jobs"],
+    summary="Cancel/delete job",
+    description="""
+    Cancel a running job or delete a completed job from memory.
+
+    **Use cases:**
+    - Stop a long-running job that's no longer needed
+    - Clean up completed jobs to free memory
+
+    **Note:** Jobs are automatically cleaned up after 24 hours.
+
+    **Authentication**: Required (unless SKIP_AUTH=true)
+    """,
+)
+async def cancel_research_job(
+    job_id: str,
+    auth: Optional[Dict[str, str]] = Depends(optional_verify_api_key),
+):
+    """
+    Cancel and delete a research job.
+
+    Can be used to stop running jobs or clean up completed jobs.
+    """
+    job = job_manager.get_job(job_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    job_manager.delete_job(job_id)
+
+    return {"message": f"Job {job_id} cancelled and deleted", "job_id": job_id}
+
+
+# Start cleanup task on startup
+@app.on_event("startup")
+async def startup_event():
+    """Start background tasks on app startup"""
+    job_manager.start_cleanup_task()
+    logger.info("Job manager cleanup task started")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up on app shutdown"""
+    job_manager.stop_cleanup_task()
+    logger.info("Job manager cleanup task stopped")

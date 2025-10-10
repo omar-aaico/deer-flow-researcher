@@ -3,9 +3,11 @@
 # SPDX-License-Identifier: MIT
 
 import json
+import ssl
 from typing import Dict, List, Optional
 
 import aiohttp
+import certifi
 import requests
 from langchain_tavily._utilities import TAVILY_API_URL
 from langchain_tavily.tavily_search import (
@@ -82,7 +84,12 @@ class EnhancedTavilySearchAPIWrapper(OriginalTavilySearchAPIWrapper):
                 "include_images": include_images,
                 "include_image_descriptions": include_image_descriptions,
             }
-            async with aiohttp.ClientSession(trust_env=True) as session:
+
+            # Create SSL context with certifi certificates
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
+            async with aiohttp.ClientSession(connector=connector, trust_env=True) as session:
                 async with session.post(f"{TAVILY_API_URL}/search", json=params) as res:
                     if res.status == 200:
                         data = await res.text()

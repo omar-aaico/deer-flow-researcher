@@ -306,7 +306,49 @@ def reporter_node(state: State, config: RunnableConfig):
     response_content = response.content
     logger.info(f"reporter response: {response_content}")
 
-    return {"final_report": response_content}
+    # Generate structured output if schema provided
+    structured_output = None
+    output_schema = state.get("output_schema")
+
+    logger.info(f"Reporter node - output_schema present: {output_schema is not None}")
+    if output_schema:
+        logger.info(f"Output schema: {json.dumps(output_schema, indent=2)}")
+
+    if output_schema:
+        try:
+            logger.info("Generating structured output from report")
+            schema = output_schema
+
+            # Use LLM with structured output to extract data from report
+            extraction_messages = [
+                HumanMessage(
+                    content=f"Extract structured data from the following research report according to the provided schema.\n\n# Report\n\n{response_content}\n\n# Schema\n\n```json\n{json.dumps(schema, indent=2)}\n```\n\nExtract and return ONLY the structured data that matches this schema. Be precise and extract all required fields."
+                )
+            ]
+
+            structured_llm = get_llm_by_type("basic").with_structured_output(
+                schema=schema,
+                method="json_mode",
+            )
+
+            structured_response = structured_llm.invoke(extraction_messages)
+            structured_output = structured_response if isinstance(structured_response, dict) else json.loads(str(structured_response))
+            logger.info(f"Structured output generated successfully: {json.dumps(structured_output, indent=2)}")
+
+        except Exception as e:
+            logger.error(f"Failed to generate structured output: {e}", exc_info=True)
+            logger.warning("Continuing without structured output")
+            structured_output = None
+    else:
+        logger.info("No output_schema provided, skipping structured output generation")
+
+    result = {
+        "final_report": response_content,
+        "structured_output": structured_output
+    }
+    logger.info(f"Reporter node returning - structured_output is None: {structured_output is None}")
+
+    return result
 
 
 def research_team_node(state: State):
@@ -503,17 +545,47 @@ async def researcher_node(
     """Researcher node that do research"""
     logger.info("Researcher node is researching.")
     configurable = Configuration.from_runnable_config(config)
-    tools = [get_web_search_tool(configurable.max_search_results), crawl_tool]
+
+    # Get search provider from state (runtime override)
+    search_provider = state.get("search_provider", "tavily")
+    logger.info(f"Using search provider: {search_provider}")
+
+    # Select search tool based on provider
+    if search_provider == "firecrawl":
+        from src.tools.firecrawl import firecrawl_search
+        search_tool = firecrawl_search
+        logger.info("Using Firecrawl search provider for deep content extraction")
+    else:
+        search_tool = get_web_search_tool(configurable.max_search_results)
+        logger.info(f"Using {search_provider} search provider")
+
+    tools = [search_tool, crawl_tool]
     retriever_tool = get_retriever_tool(state.get("resources", []))
     if retriever_tool:
         tools.insert(0, retriever_tool)
-    logger.info(f"Researcher tools: {tools}")
-    return await _setup_and_execute_agent_step(
+    logger.info(f"Researcher tools: {[t.name for t in tools]}")
+
+    # Execute agent and increment search counter
+    result = await _setup_and_execute_agent_step(
         state,
         config,
         "researcher",
         tools,
     )
+
+    # Increment search counter
+    searches_executed = state.get("searches_executed", 0) + 1
+
+    # Update result with search tracking
+    if isinstance(result, Command):
+        current_update = result.update or {}
+        current_update["searches_executed"] = searches_executed
+        result = Command(
+            update=current_update,
+            goto=result.goto
+        )
+
+    return result
 
 
 async def coder_node(

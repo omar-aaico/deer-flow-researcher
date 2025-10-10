@@ -51,3 +51,19 @@ examples/
 assets/
 tests/
 *.log
+
+# Documentation and development files
+education/
+dev-plan/
+CLAUDE.md
+PROJECT_ORGANIZATION.md
+API_DOCUMENTATION.md
+README.md
+*.md
+!pyproject.toml
+
+# Test and development files
+test_*.py
+test_*.sh
+*.ipynb
+server.log

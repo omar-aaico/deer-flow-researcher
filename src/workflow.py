@@ -30,6 +30,8 @@ async def run_agent_workflow_async(
     max_plan_iterations: int = 1,
     max_step_num: int = 3,
     enable_background_investigation: bool = True,
+    search_provider: str = "tavily",
+    output_schema: dict = None,
 ):
     """Run the agent workflow asynchronously with the given user input.
 
@@ -39,6 +41,8 @@ async def run_agent_workflow_async(
         max_plan_iterations: Maximum number of plan iterations
         max_step_num: Maximum number of steps in a plan
         enable_background_investigation: If True, performs web search before planning to enhance context
+        search_provider: Search provider to use ("tavily" or "firecrawl")
+        output_schema: Optional Pydantic schema for structured output
 
     Returns:
         The final state after the workflow completes
@@ -50,11 +54,16 @@ async def run_agent_workflow_async(
         enable_debug_logging()
 
     logger.info(f"Starting async workflow with user input: {user_input}")
+    logger.info(f"Search provider: {search_provider}")
+
     initial_state = {
         # Runtime Variables
         "messages": [{"role": "user", "content": user_input}],
         "auto_accepted_plan": True,
         "enable_background_investigation": enable_background_investigation,
+        "search_provider": search_provider,
+        "searches_executed": 0,
+        "output_schema": output_schema,
     }
     config = {
         "configurable": {

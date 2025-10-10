@@ -1,7 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Literal
 
 from pydantic import BaseModel, Field
 
@@ -64,6 +64,12 @@ class ChatRequest(BaseModel):
     )
     enable_deep_thinking: Optional[bool] = Field(
         False, description="Whether to enable deep thinking"
+    )
+    search_provider: Optional[Literal["tavily", "firecrawl"]] = Field(
+        "tavily", description="Search provider to use (tavily or firecrawl)"
+    )
+    output_schema: Optional[dict] = Field(
+        None, description="Optional Pydantic schema for structured output"
     )
 
 
