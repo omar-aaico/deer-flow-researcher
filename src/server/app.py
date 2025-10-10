@@ -697,7 +697,7 @@ async def _run_research_job(job: ResearchJob, request: AsyncResearchRequest):
     """Run research job in the background"""
     try:
         # Update status to coordinating
-        job.update_status(ResearchStatus.COORDINATING)
+        job_manager.update_job_status(job, ResearchStatus.COORDINATING)
 
         # Create thread_id
         thread_id = str(uuid4())
@@ -760,13 +760,13 @@ async def _run_research_job(job: ResearchJob, request: AsyncResearchRequest):
             if event_type == "on_chain_start":
                 node_name = event_name.lower()
                 if "coordinator" in node_name:
-                    job.update_status(ResearchStatus.COORDINATING)
+                    job_manager.update_job_status(job, ResearchStatus.COORDINATING)
                 elif "planner" in node_name:
-                    job.update_status(ResearchStatus.PLANNING)
+                    job_manager.update_job_status(job, ResearchStatus.PLANNING)
                 elif "researcher" in node_name or "coder" in node_name:
-                    job.update_status(ResearchStatus.RESEARCHING)
+                    job_manager.update_job_status(job, ResearchStatus.RESEARCHING)
                 elif "reporter" in node_name:
-                    job.update_status(ResearchStatus.REPORTING)
+                    job_manager.update_job_status(job, ResearchStatus.REPORTING)
 
             # Collect plan data
             if event_type == "on_chain_end" and "planner" in event_name.lower():
@@ -810,7 +810,10 @@ async def _run_research_job(job: ResearchJob, request: AsyncResearchRequest):
         else:
             logger.warning(f"No structured_output captured from stream for job {job.job_id}")
 
-        job.update_status(ResearchStatus.COMPLETED)
+        job_manager.update_job_status(job, ResearchStatus.COMPLETED)
+
+        # Save job result to database
+        job_manager.save_job_result(job)
 
         logger.info(f"Research job {job.job_id} completed successfully")
 
@@ -850,8 +853,25 @@ async def start_async_research(
     Returns a job_id that can be used to check status and retrieve results.
     """
     try:
-        # Create job
-        job = job_manager.create_job(request.query)
+        # Extract user info from auth (if available)
+        user_id = auth.get("user_id") if auth else None
+        api_key_name = auth.get("api_key_name") if auth else None
+
+        # Create job with full parameters for database storage
+        job = job_manager.create_job(
+            query=request.query,
+            report_style=request.report_style.value,
+            max_step_num=request.max_step_num,
+            max_search_results=request.max_search_results,
+            search_provider=request.search_provider,
+            enable_background_investigation=request.enable_background_investigation,
+            enable_deep_thinking=request.enable_deep_thinking,
+            auto_accepted_plan=request.auto_accepted_plan,
+            output_schema=request.output_schema,
+            resources=request.resources,
+            user_id=user_id,
+            api_key_name=api_key_name,
+        )
 
         # Start background task
         job.task = asyncio.create_task(_run_research_job(job, request))
