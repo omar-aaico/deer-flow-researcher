@@ -31,3 +31,14 @@ class State(MessagesState):
     # Structured output support
     output_schema: dict | None = None
     structured_output: dict | None = None
+    skip_reporting: bool = False  # Skip reporter node for faster raw results
+
+    # Person search support
+    person_search_mode: bool = False
+    quick_research_mode: bool = False  # Skip planner loop for fast person research
+    person_name: str | None = None
+    person_company: str | None = None
+    person_context: str | None = None
+    disambiguation_candidates: list[dict] | None = None
+    selected_candidate: dict | None = None
+    enriched_person_query: str | None = None

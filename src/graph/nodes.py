@@ -26,6 +26,7 @@ from src.tools import (
     python_repl_tool,
 )
 from src.tools.search import LoggedTavilySearch
+from src.config.person_schema import CANDIDATE_SCHEMA
 from src.utils.json_utils import repair_json_output
 from src.utils.context_manager import ContextManager
 
@@ -44,6 +45,188 @@ def handoff_to_planner(
     # This tool is not returning anything: we're just using it
     # as a way for LLM to signal that it needs to hand off to planner agent
     return
+
+
+def person_disambiguator_node(
+    state: State, config: RunnableConfig
+) -> Command[Literal["planner", "reporter", "__end__"]]:
+    """
+    Quick person search to identify candidates.
+    Returns candidates for disambiguation if multiple people found,
+    or enriched query if single person identified.
+    Routes to reporter in quick_research_mode, planner otherwise.
+    """
+    logger.info("Person disambiguator node is running")
+    configurable = Configuration.from_runnable_config(config)
+
+    # Check if we're in quick research mode
+    quick_research_mode = state.get("quick_research_mode", False)
+    next_node = "reporter" if quick_research_mode else "planner"
+    logger.info(f"Quick research mode: {quick_research_mode}, next node: {next_node}")
+
+    # Extract person search parameters
+    person_name = state.get("person_name") or state.get("research_topic", "")
+    person_company = state.get("person_company")
+    person_context = state.get("person_context")
+
+    logger.info(f"Searching for: {person_name}, company: {person_company}, context: {person_context}")
+
+    # Strategy: Do 2 targeted searches for better disambiguation
+    # Search 1: Broad search with just the name
+    # Search 2: Specific search with name + company (if provided)
+    try:
+        all_search_results = []
+
+        # Search 1: Broad person name search
+        broad_query = person_name
+        logger.info(f"Search 1 (broad): {broad_query}")
+
+        if SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
+            results1 = LoggedTavilySearch(max_results=3).invoke(broad_query)
+            if isinstance(results1, tuple):
+                results1 = results1[0]
+        else:
+            results1 = get_web_search_tool(3).invoke(broad_query)
+
+        if isinstance(results1, list):
+            all_search_results.extend(results1)
+            logger.info(f"Broad search returned {len(results1)} results")
+
+        # Search 2: Specific search with company (if provided)
+        if person_company:
+            specific_query = f"{person_name} {person_company}"
+            logger.info(f"Search 2 (specific): {specific_query}")
+
+            if SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
+                results2 = LoggedTavilySearch(max_results=3).invoke(specific_query)
+                if isinstance(results2, tuple):
+                    results2 = results2[0]
+            else:
+                results2 = get_web_search_tool(3).invoke(specific_query)
+
+            if isinstance(results2, list):
+                all_search_results.extend(results2)
+                logger.info(f"Specific search returned {len(results2)} results")
+
+        logger.info(f"Total search results: {len(all_search_results)}")
+
+        # Log all search results for debugging
+        for idx, result in enumerate(all_search_results):
+            logger.info(f"Result {idx+1}: {result.get('title', 'No title')}")
+            logger.debug(f"Content preview: {result.get('content', result.get('snippet', ''))[:200]}...")
+
+        # Format all search results for LLM
+        formatted_results = "\n\n".join([
+            f"## {result.get('title', 'No title')}\n{result.get('content', result.get('snippet', ''))}"
+            for result in all_search_results
+        ])
+
+        # Use LLM to extract candidates
+        prompt_content = f"""Analyze these search results for "{person_name}" and identify distinct individuals.
+
+# Search Results
+
+{formatted_results}
+
+# Task
+
+Extract a list of distinct person candidates. For each person found, provide:
+- Unique ID (candidate_1, candidate_2, etc.)
+- Full name
+- Current title
+- Current company
+- Location
+- LinkedIn URL if found
+- Brief distinguishing summary (50-100 words)
+
+**Instructions:**
+- If search results show MULTIPLE distinct people (different companies, locations, industries), list ALL of them
+- If ALL search results clearly refer to the SAME person (same LinkedIn, company, career history), return ONE candidate
+- When in doubt between one or multiple, return MULTIPLE candidates - better to ask than guess wrong
+- If NO clear person match is found, return an empty candidates array
+"""
+
+        # Load disambiguation prompt
+        with open(os.path.join(os.path.dirname(__file__), "../prompts/person_disambiguator.md"), 'r') as f:
+            system_prompt = f.read()
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt_content}
+        ]
+
+        # Get structured output from LLM
+        structured_llm = get_llm_by_type("basic").with_structured_output(
+            schema=CANDIDATE_SCHEMA,
+            method="json_mode"
+        )
+
+        response = structured_llm.invoke(messages)
+        candidates_data = response if isinstance(response, dict) else json.loads(str(response))
+        candidates = candidates_data.get("candidates", [])
+
+        logger.info(f"Extracted {len(candidates)} candidate(s)")
+
+        # Decide next action based on number of candidates
+        if len(candidates) == 0:
+            # No person found
+            logger.warning("No person candidates found")
+            raise ValueError(f"Could not identify person matching '{person_name}' in search results")
+
+        elif len(candidates) == 1:
+            # Single person found - enrich query and continue
+            candidate = candidates[0]
+            enriched_query = f"{candidate['name']}"
+            if candidate.get('title'):
+                enriched_query += f" {candidate['title']}"
+            if candidate.get('company'):
+                enriched_query += f" at {candidate['company']}"
+            if candidate.get('location'):
+                enriched_query += f" in {candidate['location']}"
+
+            logger.info(f"Single candidate identified. Enriched query: {enriched_query}")
+
+            # In quick research mode, store search results as observations for reporter
+            update_dict = {
+                "enriched_person_query": enriched_query,
+                "selected_candidate": candidate,
+                "disambiguation_candidates": None,
+                "research_topic": enriched_query,  # Update research topic with enriched version
+            }
+
+            # Add search results as observations only in quick research mode
+            if quick_research_mode:
+                # Format search results as observations for the reporter
+                observations = [
+                    f"Person identified: {candidate['name']}\n"
+                    f"Title: {candidate.get('title', 'N/A')}\n"
+                    f"Company: {candidate.get('company', 'N/A')}\n"
+                    f"Location: {candidate.get('location', 'N/A')}\n"
+                    f"Summary: {candidate.get('summary', 'N/A')}\n"
+                    f"LinkedIn: {candidate.get('linkedin', 'N/A')}"
+                ]
+                update_dict["observations"] = observations
+
+            return Command(
+                update=update_dict,
+                goto=next_node,  # Route to reporter in quick mode, planner otherwise
+            )
+
+        else:
+            # Multiple people found - need disambiguation, end workflow
+            logger.info(f"Multiple candidates found, requiring disambiguation")
+            return Command(
+                update={
+                    "disambiguation_candidates": candidates,
+                    "enriched_person_query": None,
+                    "selected_candidate": None,
+                },
+                goto="__end__",  # End workflow to wait for user selection
+            )
+
+    except Exception as e:
+        logger.error(f"Error in person disambiguation: {e}", exc_info=True)
+        raise
 
 
 def background_investigation_node(state: State, config: RunnableConfig):
@@ -115,8 +298,10 @@ def planner_node(
     else:
         llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
 
-    # if the plan iterations is greater than the max plan iterations, return the reporter node
+    # if the plan iterations is greater than the max plan iterations, go to reporter or end based on skip_reporting
     if plan_iterations >= configurable.max_plan_iterations:
+        if state.get("skip_reporting", False):
+            return Command(goto="__end__")
         return Command(goto="reporter")
 
     full_response = ""
@@ -141,12 +326,14 @@ def planner_node(
     if isinstance(curr_plan, dict) and curr_plan.get("has_enough_context"):
         logger.info("Planner response has enough context.")
         new_plan = Plan.model_validate(curr_plan)
+        # Check if reporting should be skipped
+        goto_node = "__end__" if state.get("skip_reporting", False) else "reporter"
         return Command(
             update={
                 "messages": [AIMessage(content=full_response, name="planner")],
                 "current_plan": new_plan,
             },
-            goto="reporter",
+            goto=goto_node,
         )
     return Command(
         update={
@@ -193,7 +380,8 @@ def human_feedback_node(
     except json.JSONDecodeError:
         logger.warning("Planner response is not a valid JSON")
         if plan_iterations > 1:  # the plan_iterations is increased before this check
-            return Command(goto="reporter")
+            goto_node = "__end__" if state.get("skip_reporting", False) else "reporter"
+            return Command(goto=goto_node)
         else:
             return Command(goto="__end__")
 
@@ -209,10 +397,24 @@ def human_feedback_node(
 
 def coordinator_node(
     state: State, config: RunnableConfig
-) -> Command[Literal["planner", "background_investigator", "__end__"]]:
+) -> Command[Literal["planner", "background_investigator", "person_disambiguator", "__end__"]]:
     """Coordinator node that communicate with customers."""
     logger.info("Coordinator talking.")
     configurable = Configuration.from_runnable_config(config)
+
+    # Check if person search mode is enabled
+    if state.get("person_search_mode"):
+        logger.info("Person search mode enabled - routing to person_disambiguator")
+        return Command(
+            update={
+                "messages": state.get("messages", []),
+                "locale": state.get("locale", "en-US"),
+                "research_topic": state.get("research_topic", ""),
+                "resources": configurable.resources,
+            },
+            goto="person_disambiguator",
+        )
+
     messages = apply_prompt_template("coordinator", state)
     response = (
         get_llm_by_type(AGENT_LLM_MAP["coordinator"])
@@ -265,15 +467,43 @@ def reporter_node(state: State, config: RunnableConfig):
     """Reporter node that write a final report."""
     logger.info("Reporter write final report")
     configurable = Configuration.from_runnable_config(config)
+
+    # Handle quick research mode (no plan)
+    quick_research_mode = state.get("quick_research_mode", False)
     current_plan = state.get("current_plan")
-    input_ = {
-        "messages": [
-            HumanMessage(
-                f"# Research Requirements\n\n## Task\n\n{current_plan.title}\n\n## Description\n\n{current_plan.thought}"
+
+    if quick_research_mode and not current_plan:
+        # In quick research mode, use research_topic and selected_candidate
+        research_topic = state.get("research_topic", "")
+        selected_candidate = state.get("selected_candidate", {})
+
+        task_description = f"Quick research on {research_topic}"
+        if selected_candidate:
+            task_description = (
+                f"Research report on {selected_candidate.get('name', research_topic)} "
+                f"({selected_candidate.get('title', 'N/A')} at {selected_candidate.get('company', 'N/A')})"
             )
-        ],
-        "locale": state.get("locale", "en-US"),
-    }
+
+        input_ = {
+            "messages": [
+                HumanMessage(
+                    f"# Research Requirements\n\n## Task\n\n{task_description}\n\n## Description\n\n"
+                    f"Generate a concise research report based on the available information about this person."
+                )
+            ],
+            "locale": state.get("locale", "en-US"),
+        }
+    else:
+        # Normal mode with plan
+        input_ = {
+            "messages": [
+                HumanMessage(
+                    f"# Research Requirements\n\n## Task\n\n{current_plan.title}\n\n## Description\n\n{current_plan.thought}"
+                )
+            ],
+            "locale": state.get("locale", "en-US"),
+        }
+
     invoke_messages = apply_prompt_template("reporter", input_, configurable)
     observations = state.get("observations", [])
 

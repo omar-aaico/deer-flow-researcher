@@ -11,6 +11,7 @@ from .nodes import (
     coder_node,
     coordinator_node,
     human_feedback_node,
+    person_disambiguator_node,
     planner_node,
     reporter_node,
     research_team_node,
@@ -49,6 +50,7 @@ def _build_base_graph():
     builder = StateGraph(State)
     builder.add_edge(START, "coordinator")
     builder.add_node("coordinator", coordinator_node)
+    builder.add_node("person_disambiguator", person_disambiguator_node)
     builder.add_node("background_investigator", background_investigation_node)
     builder.add_node("planner", planner_node)
     builder.add_node("reporter", reporter_node)
@@ -56,6 +58,10 @@ def _build_base_graph():
     builder.add_node("researcher", researcher_node)
     builder.add_node("coder", coder_node)
     builder.add_node("human_feedback", human_feedback_node)
+
+    # Coordinator routes via Command(goto=...) - no conditional edges needed
+    # Person disambiguator routes to planner for single match (via Command)
+    builder.add_edge("person_disambiguator", "planner")
     builder.add_edge("background_investigator", "planner")
     builder.add_conditional_edges(
         "research_team",
@@ -84,4 +90,21 @@ def build_graph():
     return builder.compile()
 
 
+def build_quick_research_graph():
+    """Build a simplified graph for quick person research (skips planner loop)."""
+    builder = StateGraph(State)
+    builder.add_edge(START, "coordinator")
+    builder.add_node("coordinator", coordinator_node)
+    builder.add_node("person_disambiguator", person_disambiguator_node)
+    builder.add_node("reporter", reporter_node)
+
+    # Quick flow: coordinator → person_disambiguator → reporter
+    # Coordinator and person_disambiguator use Command(goto=...) for routing
+    # No static edges needed - they handle their own routing
+    builder.add_edge("reporter", END)
+
+    return builder.compile()
+
+
 graph = build_graph()
+# quick_research_graph = build_quick_research_graph()  # Temporarily disabled - has routing issues

@@ -53,6 +53,9 @@ class AsyncResearchRequest(BaseModel):
     output_schema: Optional[dict] = Field(
         None, description="Optional Pydantic schema for structured output"
     )
+    skip_reporting: Optional[bool] = Field(
+        False, description="If True, skips report generation and returns raw observations. Saves 5-10s execution time."
+    )
 
 
 class AsyncResearchResponse(BaseModel):

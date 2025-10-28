@@ -47,6 +47,13 @@ from src.server.async_request import (
     ResearchStatusResponse,
     ResearchResultResponse,
 )
+from src.server.models import (
+    PersonResearchRequest,
+    PersonResearchResponse,
+    DisambiguationRequest,
+    Candidate,
+)
+from src.config.person_schema import DEFAULT_PERSON_SCHEMA
 from src.server.config_request import ConfigResponse
 from src.server.job_manager import job_manager, ResearchJob
 from src.server.mcp_request import MCPServerMetadataRequest, MCPServerMetadataResponse
@@ -126,6 +133,7 @@ load_examples()
 
 in_memory_store = InMemoryStore()
 graph = build_graph_with_memory()
+# quick_research_graph = build_quick_research_graph()  # Disabled - not used in sync endpoint
 
 
 @app.on_event("startup")
@@ -716,6 +724,7 @@ async def _run_research_job(job: ResearchJob, request: AsyncResearchRequest):
             "search_provider": request.search_provider,
             "searches_executed": 0,
             "output_schema": request.output_schema,
+            "skip_reporting": request.skip_reporting,  # Pass skip_reporting flag
         }
 
         # Prepare workflow config
@@ -736,6 +745,7 @@ async def _run_research_job(job: ResearchJob, request: AsyncResearchRequest):
         researcher_findings_chunks = []
         plan_data = None
         latest_structured_output = None
+        final_state = None
 
         # Stream and process events using astream_events for better control
         async for event in graph.astream_events(
@@ -759,6 +769,7 @@ async def _run_research_job(job: ResearchJob, request: AsyncResearchRequest):
             # Track node transitions for status updates
             if event_type == "on_chain_start":
                 node_name = event_name.lower()
+                logger.info(f"[NODE START] {node_name} | skip_reporting={workflow_input.get('skip_reporting', False)}")
                 if "coordinator" in node_name:
                     job_manager.update_job_status(job, ResearchStatus.COORDINATING)
                 elif "planner" in node_name:
@@ -766,6 +777,7 @@ async def _run_research_job(job: ResearchJob, request: AsyncResearchRequest):
                 elif "researcher" in node_name or "coder" in node_name:
                     job_manager.update_job_status(job, ResearchStatus.RESEARCHING)
                 elif "reporter" in node_name:
+                    logger.warning(f"[REPORTER NODE CALLED] This should NOT happen when skip_reporting=True!")
                     job_manager.update_job_status(job, ResearchStatus.REPORTING)
 
             # Collect plan data
@@ -797,16 +809,39 @@ async def _run_research_job(job: ResearchJob, request: AsyncResearchRequest):
                     elif "researcher" in node or "coder" in node:
                         researcher_findings_chunks.append(chunk.content)
 
+            # Capture final state output
+            if event_type == "on_chain_end" and event_name == "LangGraph":
+                output = event_data.get("output", {})
+                if isinstance(output, dict):
+                    final_state = output
+                    logger.info(f"Captured final state with keys: {list(output.keys())}")
+
         # Mark as completed
         job.final_report = "".join(final_report_chunks) if final_report_chunks else None
-        job.researcher_findings = (
-            "".join(researcher_findings_chunks) if researcher_findings_chunks else None
-        )
 
-        # Use structured output captured from stream
+        # When skip_reporting=True, use observations from final_state as researcher_findings
+        if request.skip_reporting and final_state:
+            observations = final_state.get("observations", [])
+            if observations:
+                # Format observations as structured text
+                formatted_observations = "\n\n---\n\n".join(observations)
+                job.researcher_findings = formatted_observations
+                logger.info(f"Populated researcher_findings from {len(observations)} observations (skip_reporting=True)")
+            else:
+                logger.warning(f"No observations found in final state despite skip_reporting=True")
+        else:
+            # Use streamed researcher content (legacy behavior)
+            job.researcher_findings = (
+                "".join(researcher_findings_chunks) if researcher_findings_chunks else None
+            )
+
+        # Use structured output captured from stream or from final_state
         if latest_structured_output:
             job.structured_output = latest_structured_output
             logger.info(f"Set structured_output from stream for job {job.job_id}: {latest_structured_output}")
+        elif final_state and final_state.get("structured_output"):
+            job.structured_output = final_state.get("structured_output")
+            logger.info(f"Set structured_output from final_state for job {job.job_id}")
         else:
             logger.warning(f"No structured_output captured from stream for job {job.job_id}")
 
@@ -884,6 +919,98 @@ async def start_async_research(
 
     except Exception as e:
         logger.exception("Error starting async research")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/research/sync",
+    response_model=ResearchResultResponse,
+    tags=["Jobs"],
+    summary="Run synchronous research",
+    description="""
+    Run research synchronously and return results immediately.
+
+    This endpoint blocks until research completes and returns the full result.
+    By default, it skips report generation (skip_reporting=True) for faster execution,
+    returning only observations and plan. Set skip_reporting=False to include the final report.
+
+    **Performance:**
+    - With skip_reporting=True (default): ~20-40s (no markdown generation)
+    - With skip_reporting=False: ~30-60s (includes full report)
+
+    **Use Cases:**
+    - API integrations needing raw research data
+    - Applications building custom reports from observations
+    - Speed-critical workflows
+
+    **Optimization Tips:**
+    - Use max_plan_iterations=1, max_step_num=2-3 for fastest results
+    - Reduce max_search_results to 2 for lower token usage
+    - Disable enable_background_investigation for speed
+
+    **Authentication**: Required (unless SKIP_AUTH=true)
+    """,
+)
+async def sync_research(
+    request: AsyncResearchRequest,
+    auth: Optional[Dict[str, str]] = Depends(optional_verify_api_key),
+):
+    """
+    Run research synchronously with optional report skipping.
+
+    By default, skips reporter node (skip_reporting=True) for 5-10s faster execution.
+    Returns observations, plan, and optional structured output immediately.
+    """
+    try:
+        # Override skip_reporting to True by default for sync endpoint
+        if request.skip_reporting is None:
+            request.skip_reporting = True
+
+        # Extract user info from auth (if available)
+        user_id = auth.get("user_id") if auth else None
+        api_key_name = auth.get("api_key_name") if auth else None
+
+        # Create job
+        job = job_manager.create_job(
+            query=request.query,
+            report_style=request.report_style.value,
+            max_step_num=request.max_step_num,
+            max_search_results=request.max_search_results,
+            search_provider=request.search_provider,
+            enable_background_investigation=request.enable_background_investigation,
+            enable_deep_thinking=request.enable_deep_thinking,
+            auto_accepted_plan=request.auto_accepted_plan,
+            output_schema=request.output_schema,
+            resources=request.resources,
+            user_id=user_id,
+            api_key_name=api_key_name,
+        )
+
+        # Run research synchronously (await instead of background task)
+        await _run_research_job(job, request)
+
+        # Return result immediately
+        return ResearchResultResponse(
+            job_id=job.job_id,
+            status=job.status,
+            thread_id=job.thread_id or "",
+            query=job.query,
+            final_report=job.final_report,
+            researcher_findings=job.researcher_findings,
+            plan=job.plan,
+            structured_output=job.structured_output,
+            error=job.error,
+            created_at=job.created_at.isoformat(),
+            completed_at=job.completed_at.isoformat() if job.completed_at else None,
+            duration_seconds=(
+                (job.completed_at - job.created_at).total_seconds()
+                if job.completed_at
+                else None
+            ),
+        )
+
+    except Exception as e:
+        logger.exception("Error in sync research")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1022,6 +1149,501 @@ async def cancel_research_job(
     job_manager.delete_job(job_id)
 
     return {"message": f"Job {job_id} cancelled and deleted", "job_id": job_id}
+
+
+async def _run_person_research_job(
+    job: ResearchJob,
+    request: PersonResearchRequest,
+    enriched_query: Optional[str] = None
+):
+    """Run person research job synchronously"""
+    try:
+        job_manager.update_job_status(job, ResearchStatus.COORDINATING)
+
+        # Create thread_id
+        thread_id = str(uuid4())
+        job.thread_id = thread_id
+
+        # Use enriched query if provided (after disambiguation), otherwise use person_name
+        query = enriched_query or request.person_name
+
+        # Prepare workflow input
+        workflow_input = {
+            "messages": [{"role": "user", "content": query}],
+            "plan_iterations": 0,
+            "final_report": "",
+            "observations": [],
+            "auto_accepted_plan": True,  # Always auto-accept for person search
+            "enable_background_investigation": False,  # Skip background - we already did quick search
+            "research_topic": query,
+            "search_provider": "tavily",
+            "searches_executed": 0,
+            "output_schema": request.output_schema or DEFAULT_PERSON_SCHEMA,
+            "person_search_mode": True,  # Enable person search mode
+            "person_name": request.person_name,
+            "person_company": request.company,
+            "person_context": request.additional_context,
+        }
+
+        # Prepare workflow config
+        workflow_config = {
+            "thread_id": thread_id,
+            "resources": [],
+            "max_plan_iterations": request.max_plan_iterations,
+            "max_step_num": request.max_step_num,
+            "max_search_results": 3,
+            "mcp_settings": {},
+            "report_style": request.report_style,
+            "enable_deep_thinking": False,
+            "recursion_limit": get_recursion_limit(),
+        }
+
+        # Track output
+        final_report_chunks = []
+        latest_structured_output = None
+        disambiguation_candidates = None
+        selected_candidate = None
+
+        # Stream and process events
+        async for event in graph.astream_events(
+            workflow_input,
+            config=workflow_config,
+            version="v2",
+        ):
+            event_type = event.get("event")
+            event_name = event.get("name", "")
+            event_data = event.get("data", {})
+            metadata = event.get("metadata", {})
+
+            # Capture structured_output from reporter_node
+            if event_type == "on_chain_end" and "reporter" in event_name.lower():
+                output = event_data.get("output", {})
+                if isinstance(output, dict) and "structured_output" in output:
+                    latest_structured_output = output["structured_output"]
+                    logger.info(f"Captured structured_output for person: {latest_structured_output}")
+
+            # Capture disambiguation candidates from person_disambiguator_node
+            if event_type == "on_chain_end" and "person_disambiguator" in event_name.lower():
+                output = event_data.get("output", {})
+                if isinstance(output, dict):
+                    disambiguation_candidates = output.get("disambiguation_candidates")
+                    selected_candidate = output.get("selected_candidate")
+                    logger.info(f"Disambiguation result: {len(disambiguation_candidates) if disambiguation_candidates else 0} candidates")
+
+            # Track status
+            if event_type == "on_chain_start":
+                node_name = event_name.lower()
+                if "person_disambiguator" in node_name:
+                    job_manager.update_job_status(job, ResearchStatus.COORDINATING)
+                elif "planner" in node_name:
+                    job_manager.update_job_status(job, ResearchStatus.PLANNING)
+                elif "researcher" in node_name or "coder" in node_name:
+                    job_manager.update_job_status(job, ResearchStatus.RESEARCHING)
+                elif "reporter" in node_name:
+                    job_manager.update_job_status(job, ResearchStatus.REPORTING)
+
+            # Collect report content
+            if event_type == "on_chat_model_stream":
+                chunk = event_data.get("chunk")
+                if chunk and hasattr(chunk, "content") and chunk.content:
+                    node = metadata.get("langgraph_node", "")
+                    if "reporter" in node:
+                        final_report_chunks.append(chunk.content)
+
+        # Check if disambiguation is needed
+        if disambiguation_candidates and len(disambiguation_candidates) > 0:
+            logger.info(f"Person research requires disambiguation: {len(disambiguation_candidates)} candidates")
+            return {
+                "disambiguation_needed": True,
+                "candidates": disambiguation_candidates,
+            }
+
+        # Otherwise, we have the final result
+        job.final_report = "".join(final_report_chunks) if final_report_chunks else None
+        job.structured_output = latest_structured_output
+
+        job_manager.update_job_status(job, ResearchStatus.COMPLETED)
+        job_manager.save_job_result(job)
+
+        logger.info(f"Person research job {job.job_id} completed successfully")
+
+        return {
+            "disambiguation_needed": False,
+            "final_report": job.final_report,
+            "structured_output": job.structured_output,
+            "selected_candidate": selected_candidate,
+        }
+
+    except Exception as e:
+        logger.exception(f"Error in person research job {job.job_id}")
+        job.set_error(str(e))
+        raise
+
+
+# DEACTIVATED - Use /api/quickresearch instead
+# @app.post(
+#     "/api/research/person",
+#     response_model=PersonResearchResponse,
+#     tags=["Research"],
+#     summary="Research a person (synchronous)",
+#     description="""
+#     Search and research a specific person. Returns either:
+#     1. Complete research report (if single person identified)
+#     2. List of candidates for disambiguation (if multiple people found)
+#     3. Error (if no person found)
+
+#     **This endpoint blocks** until research completes or disambiguation is needed.
+
+#     **Workflow:**
+#     - Single match → Returns completed research immediately
+#     - Multiple matches → Returns candidates list, call `/api/research/person/{job_id}/disambiguate`
+#     - No match → Returns error
+
+#     **Authentication**: Required (unless SKIP_AUTH=true)
+#     """,
+# )
+# async def research_person(
+#     request: PersonResearchRequest,
+#     auth: Optional[Dict[str, str]] = Depends(optional_verify_api_key),
+# ):
+#     """
+#     Research a person with optional disambiguation.
+
+#     If multiple people match, returns candidates for user to choose from.
+#     """
+#     try:
+#         # Extract user info from auth
+#         user_id = auth.get("user_id") if auth else None
+#         api_key_name = auth.get("api_key_name") if auth else None
+#
+#         # Build search query
+#         query_parts = [request.person_name]
+#         if request.company:
+#             query_parts.append(request.company)
+#         if request.additional_context:
+#             query_parts.append(request.additional_context)
+#         query = " ".join(query_parts)
+#
+#         # Create job
+#         job = job_manager.create_job(
+#             query=query,
+#             report_style=request.report_style,
+#             max_step_num=request.max_step_num,
+#             max_search_results=3,
+#             search_provider="tavily",
+#             enable_background_investigation=False,
+#             enable_deep_thinking=False,
+#             auto_accepted_plan=True,
+#             output_schema=request.output_schema or DEFAULT_PERSON_SCHEMA,
+#             resources=[],
+#             user_id=user_id,
+#             api_key_name=api_key_name,
+#         )
+#
+#         # Run research synchronously
+#         result = await _run_person_research_job(job, request)
+#
+#         # Check if disambiguation needed
+#         if result.get("disambiguation_needed"):
+#             candidates = result["candidates"]
+#             return PersonResearchResponse(
+#                 job_id=job.job_id,
+#                 status="awaiting_disambiguation",
+#                 message=f"Found {len(candidates)} people matching '{request.person_name}'",
+#                 candidates=[Candidate(**c) for c in candidates],
+#             )
+#
+#         # Return completed research
+#         return PersonResearchResponse(
+#             job_id=job.job_id,
+#             status="completed",
+#             final_report=result["final_report"],
+#             structured_output=result["structured_output"],
+#             selected_candidate=Candidate(**result["selected_candidate"]) if result.get("selected_candidate") else None,
+#         )
+#
+#     except Exception as e:
+#         logger.exception("Error in person research")
+#         # Create a failed job for error tracking
+#         job = job_manager.create_job(query=request.person_name)
+#         job.set_error(str(e))
+#         raise HTTPException(
+#             status_code=500,
+#             detail=str(e)
+#         )
+
+
+# DEACTIVATED - Use /api/quickresearch instead
+# @app.post(
+#     "/api/research/person/{job_id}/disambiguate",
+#     response_model=PersonResearchResponse,
+#     tags=["Research"],
+#     summary="Select person candidate and complete research",
+#     description="""
+#     After receiving candidates from `/api/research/person`, use this endpoint to:
+#     1. Select the correct person by candidate ID
+#     2. Optionally provide additional context
+#     3. Complete the full research
+#
+#     **This endpoint blocks** until research completes.
+#
+#     Returns the complete research report and structured output.
+#
+#     **Authentication**: Required (unless SKIP_AUTH=true)
+#     """,
+# )
+# async def disambiguate_person(
+#     job_id: str,
+#     request: DisambiguationRequest,
+#     auth: Optional[Dict[str, str]] = Depends(optional_verify_api_key),
+# ):
+#     """
+#     Complete person research after disambiguation.
+#
+#     Select a candidate from the disambiguation list and run full research.
+#     """
+#     try:
+#         # Get the job
+#         job = job_manager.get_job(job_id)
+#         if not job:
+#             raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+#
+#         # Validate job is awaiting disambiguation
+#         if job.status != ResearchStatus.COMPLETED:
+#             # The job should be in memory with candidates stored
+#             # For now, we'll need to re-run from the beginning with enriched context
+#             pass
+#
+#         # We need to get the candidates from somewhere
+#         # Since we're using state-only approach, we need to fetch from the graph state
+#         # For simplicity, we'll reconstruct the research request with enriched query
+#
+#         # Build enriched query from selected candidate ID
+#         # This is a simplified approach - in production, you'd store candidates in job
+#         enriched_query = f"{request.selected_candidate_id}"
+#         if request.additional_context:
+#             enriched_query += f" {request.additional_context}"
+#
+#         # Create a new request with enriched context
+#         person_request = PersonResearchRequest(
+#             person_name=enriched_query,
+#             report_style="sales_intelligence",
+#             max_plan_iterations=1,
+#             max_step_num=1,
+#         )
+#
+#         # Run research with enriched query
+#         result = await _run_person_research_job(job, person_request, enriched_query=enriched_query)
+#
+#         # Should not need disambiguation again
+#         if result.get("disambiguation_needed"):
+#             raise HTTPException(
+#                 status_code=500,
+#                 detail="Unexpected disambiguation required after selection"
+#             )
+#
+#         # Return completed research
+#         return PersonResearchResponse(
+#             job_id=job.job_id,
+#             status="completed",
+#             final_report=result["final_report"],
+#             structured_output=result["structured_output"],
+#             selected_candidate=Candidate(**result["selected_candidate"]) if result.get("selected_candidate") else None,
+#         )
+#
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.exception(f"Error in person disambiguation for job {job_id}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/quickresearch",
+    response_model=PersonResearchResponse,
+    tags=["Research"],
+    summary="Quick person research (fast, no planner loop)",
+    description="""
+    Fast person research that skips the planner loop for quick results.
+
+    **Flow:** coordinator → person_disambiguator → reporter (10-20s vs 30-60s)
+
+    Returns either:
+    1. Quick research report (if single person identified)
+    2. List of candidates for disambiguation (if multiple people found)
+    3. Error (if no person found)
+
+    **This endpoint blocks** until research completes or disambiguation is needed.
+
+    **Workflow:**
+    - Single match → Returns quick report immediately (10-20s)
+    - Multiple matches → Returns candidates list for disambiguation
+    - No match → Returns error
+
+    **Authentication**: Required (unless SKIP_AUTH=true)
+    """,
+)
+async def quick_research_person(
+    request: PersonResearchRequest,
+    auth: Optional[Dict[str, str]] = Depends(optional_verify_api_key),
+):
+    """
+    Fast person research with no planner loop.
+
+    Uses simplified graph: coordinator → person_disambiguator → reporter
+    """
+    try:
+        # Extract user info from auth
+        user_id = auth.get("user_id") if auth else None
+        api_key_name = auth.get("api_key_name") if auth else None
+
+        # Build search query
+        query_parts = [request.person_name]
+        if request.company:
+            query_parts.append(request.company)
+        if request.additional_context:
+            query_parts.append(request.additional_context)
+        query = " ".join(query_parts)
+
+        # Create job
+        job = job_manager.create_job(
+            query=query,
+            report_style=request.report_style,
+            max_step_num=request.max_step_num,
+            max_search_results=3,
+            search_provider="tavily",
+            enable_background_investigation=False,
+            enable_deep_thinking=False,
+            auto_accepted_plan=True,
+            output_schema=request.output_schema or DEFAULT_PERSON_SCHEMA,
+            resources=[],
+            user_id=user_id,
+            api_key_name=api_key_name,
+        )
+
+        # Run quick research
+        job_manager.update_job_status(job, ResearchStatus.COORDINATING)
+
+        # Create thread_id
+        thread_id = str(uuid4())
+        job.thread_id = thread_id
+
+        # Prepare workflow input with quick_research_mode enabled
+        workflow_input = {
+            "messages": [{"role": "user", "content": query}],
+            "plan_iterations": 0,
+            "final_report": "",
+            "observations": [],
+            "auto_accepted_plan": True,
+            "enable_background_investigation": False,
+            "research_topic": query,
+            "search_provider": "tavily",
+            "searches_executed": 0,
+            "output_schema": request.output_schema or DEFAULT_PERSON_SCHEMA,
+            "person_search_mode": True,
+            "quick_research_mode": True,  # Enable quick research mode
+            "person_name": request.person_name,
+            "person_company": request.company,
+            "person_context": request.additional_context,
+        }
+
+        # Prepare workflow config
+        workflow_config = {
+            "thread_id": thread_id,
+            "resources": [],
+            "max_plan_iterations": 0,  # No planning in quick mode
+            "max_step_num": 0,  # No research steps
+            "max_search_results": 3,
+            "mcp_settings": {},
+            "report_style": request.report_style,
+            "enable_deep_thinking": False,
+            "recursion_limit": get_recursion_limit(),
+        }
+
+        # Track output
+        final_report_chunks = []
+        latest_structured_output = None
+        disambiguation_candidates = None
+        selected_candidate = None
+
+        # Stream and process events using quick_research_graph
+        async for event in quick_research_graph.astream_events(
+            workflow_input,
+            config=workflow_config,
+            version="v2",
+        ):
+            event_type = event.get("event")
+            event_name = event.get("name", "")
+            event_data = event.get("data", {})
+            metadata = event.get("metadata", {})
+
+            # Capture structured_output from reporter_node
+            if event_type == "on_chain_end" and "reporter" in event_name.lower():
+                output = event_data.get("output", {})
+                if isinstance(output, dict) and "structured_output" in output:
+                    latest_structured_output = output["structured_output"]
+                    logger.info(f"Captured structured_output for quick research: {latest_structured_output}")
+
+            # Capture disambiguation candidates from person_disambiguator_node
+            if event_type == "on_chain_end" and "person_disambiguator" in event_name.lower():
+                output = event_data.get("output", {})
+                if isinstance(output, dict):
+                    disambiguation_candidates = output.get("disambiguation_candidates")
+                    selected_candidate = output.get("selected_candidate")
+                    logger.info(f"Quick research disambiguation result: {len(disambiguation_candidates) if disambiguation_candidates else 0} candidates")
+
+            # Track status
+            if event_type == "on_chain_start":
+                node_name = event_name.lower()
+                if "person_disambiguator" in node_name:
+                    job_manager.update_job_status(job, ResearchStatus.COORDINATING)
+                elif "reporter" in node_name:
+                    job_manager.update_job_status(job, ResearchStatus.REPORTING)
+
+            # Collect report content
+            if event_type == "on_chat_model_stream":
+                chunk = event_data.get("chunk")
+                if chunk and hasattr(chunk, "content") and chunk.content:
+                    node = metadata.get("langgraph_node", "")
+                    if "reporter" in node:
+                        final_report_chunks.append(chunk.content)
+
+        # Check if disambiguation is needed
+        if disambiguation_candidates and len(disambiguation_candidates) > 0:
+            logger.info(f"Quick research requires disambiguation: {len(disambiguation_candidates)} candidates")
+            return PersonResearchResponse(
+                job_id=job.job_id,
+                status="awaiting_disambiguation",
+                message=f"Found {len(disambiguation_candidates)} people matching '{request.person_name}'",
+                candidates=[Candidate(**c) for c in disambiguation_candidates],
+            )
+
+        # Otherwise, we have the final result
+        job.final_report = "".join(final_report_chunks) if final_report_chunks else None
+        job.structured_output = latest_structured_output
+
+        job_manager.update_job_status(job, ResearchStatus.COMPLETED)
+        job_manager.save_job_result(job)
+
+        logger.info(f"Quick research job {job.job_id} completed successfully")
+
+        return PersonResearchResponse(
+            job_id=job.job_id,
+            status="completed",
+            final_report=job.final_report,
+            structured_output=job.structured_output,
+            selected_candidate=Candidate(**selected_candidate) if selected_candidate else None,
+        )
+
+    except Exception as e:
+        logger.exception("Error in quick research")
+        # Create a failed job for error tracking
+        job = job_manager.create_job(query=request.person_name)
+        job.set_error(str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 
 # Start cleanup task on startup
